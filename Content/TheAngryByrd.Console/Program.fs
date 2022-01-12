@@ -11,15 +11,18 @@ open Dapper.FSharp
 open Npgsql
 open Dapper.FSharp.PostgreSQL
 open System.Threading.Tasks
+open System.Threading
+open Microsoft.Extensions.Caching.Distributed
 
 module Option =
     let inline ofNull value =
-        if Object.ReferenceEquals(value, null) then Some value
-        else None 
+        if Object.ReferenceEquals(value, null) then None
+        else Some value 
     let inline bindNull ([<InlineIfLambda>] binder) option =
         match option with
         | Some x -> binder x |> ofNull
         | None -> None
+
 
 [<Interface>] type IProvideLoggers = abstract CreateLogger: categoryName:string -> ILogger
 
@@ -27,20 +30,29 @@ module Option =
 
 [<Interface>] 
 type IWrapDapper =
-    abstract QueryAsync<'T> : sql: string * ?param:obj * ?transaction:IDbTransaction * ?commandTimeout:int * ?commandType:CommandType -> Task<'T seq>
-    abstract ExecuteAsync : sql: string * ?param:obj * ?transaction:IDbTransaction * ?commandTimeout:int * ?commandType:CommandType -> Task<int>
+    abstract QueryAsync<'T> :  sql: string * ?param:obj * ?transaction:IDbTransaction * ?commandTimeout:int * ?commandType:CommandType * ?cancellationToken : CancellationToken -> Task<'T seq>
+    abstract ExecuteAsync :    sql: string * ?param:obj * ?transaction:IDbTransaction * ?commandTimeout:int * ?commandType:CommandType * ?cancellationToken : CancellationToken -> Task<int>
     abstract SelectAsync<'T> : sql: SelectQuery * ?transaction:IDbTransaction * ?commandTimeout:int  -> Task<'T seq>
     abstract InsertAsync<'T> : sql: InsertQuery<'T> * ?transaction:IDbTransaction * ?commandTimeout:int  -> Task<int>
     abstract UpdateAsync<'T> : sql: UpdateQuery<'T> * ?transaction:IDbTransaction * ?commandTimeout:int  -> Task<int>
-    abstract DeleteAsync : sql: DeleteQuery * ?transaction:IDbTransaction * ?commandTimeout:int  -> Task<int>
+    abstract DeleteAsync :     sql: DeleteQuery * ?transaction:IDbTransaction * ?commandTimeout:int  -> Task<int>
 
 [<Interface>] type IProvideDatabaseAccess = abstract Database: IWrapDapper
 
+[<Interface>] 
+type IProvideDateTime = 
+    abstract UtcNow: DateTimeOffset
+
+[<Interface>] 
+type IProvideCaching = 
+    abstract DistributedCache: IDistributedCache
 [<Interface>] 
 type IEnvironment =
     inherit IProvideLoggers
     inherit IProvideConfiguration
     inherit IProvideDatabaseAccess
+    inherit IProvideDateTime
+    inherit IProvideCaching
 
 module Configuration =
     let get(env: #IProvideConfiguration) = env.Configuration
@@ -61,6 +73,8 @@ type LogProvider =
 
         LogProvider.createLogger $"{location}.{memberName.Value}" env
 
+module DateTimeOffset =
+    let utcNow (env : #IProvideDateTime) = env.UtcNow
 module Log =
     open System
     open System.Text.RegularExpressions
@@ -151,47 +165,66 @@ module Log =
         let messageFormat, args = _setMessageInterpolated message
         logger.LogCritical(exn, messageFormat, args)
 
-// module Db = 
-//     let fetchUser (env: #IDb) userId = 
-//         env.Database.Query("", {| userId = userId |})
-//     let updateUser (env: #IDb) user = env.Database.Execute("", user)
+module DistributedCache =
+    let get (env : #IProvideCaching) = env.DistributedCache
 
+module ActorRepository =
+    [<CLIMutable>]
+    type Actor = {
+        actor_id : int64
+        first_name : string
+        last_name : string
+        last_update : DateTime
+    }
+
+    let fetchActors (env: #IProvideDatabaseAccess) = async {
+        let! ct = Async.CancellationToken
+        return! env.Database.QueryAsync<Actor>("SELECT * FROM actor", cancellationToken=ct) |> Async.AwaitTask
+    }
 module App =
     open FsToolkit.ErrorHandling
 
-    [<CLIMutable>]
-    type User = {
-        Name : string
-        Email : string
-    }
-
-    let fetchUsers (env: #IProvideDatabaseAccess) = async {
-        // conn.ExecuteAsync("")
-        return! env.Database.QueryAsync<User>("SELECT * FROM users") |> Async.AwaitTask
-        // return! Db.fetchUser env "3"
+    let getActorName env = async {
+        
+        let logger = LogProvider.getCategoryNameByFunc env
+        let! ct = Async.CancellationToken
+        let cache = DistributedCache.get env
+        let! firstActor = cache.GetStringAsync("first-actor", ct) |> Async.AwaitTask
+        if isNull firstActor then
+            Log.info $"Cache miss, Fetching actors" logger
+            let! actors = ActorRepository.fetchActors env
+            let actor = actors |> Seq.head
+            let name = actor.first_name
+            let cacheOptions = DistributedCacheEntryOptions(AbsoluteExpirationRelativeToNow = TimeSpan.FromSeconds(10.))
+            do! cache.SetStringAsync("first-actor", name, cacheOptions, ct) |> Async.AwaitTask
+            return name
+        else
+            return firstActor
     }
 
     let doWork env = async {
+        let! ct = Async.CancellationToken
         let logger = LogProvider.getCategoryNameByFunc env
         let mutable someValue = 42
-        Log.info $"Starting work {someValue:anotherValue}" logger
+        Log.info $"Starting work {someValue:anotherValue} {DateTimeOffset.utcNow env:now}" logger
         let config = Configuration.get env
-        // printfn "-> %s" config.["lol"]
-        let! users = fetchUsers env
+        let mycustomKey = config.["MyCustomKey"]
+        let! actorName = getActorName env
         // config.AsEnumerable() |> Seq.iter(printfn "%A")
         do! Async.Sleep 2000
-
         // failwith "lol"
-        someValue <- someValue / 2
-        Log.warn $"Finishing work {someValue:anotherValue}" logger
+        someValue <- someValue /2
+        Log.warn $"Finishing work {mycustomKey:mycustomKey}, {actorName:actorName}, {someValue:anotherValue}, {DateTimeOffset.utcNow env:now}" logger
         ()
     }
 
-type AppEnv (service : IServiceProvider) = 
+type AppEnvironment (service : IServiceProvider) = 
     interface IEnvironment with 
         // why `service.GetService`? It allows us to lazily get the implementation of an interface rather than
         // creating it everytime AppEnv is created. This mimics the same concept when a class will only use certain interfaces
-        // so not all things are created everytime, boosting performance. It does add boiler plate but it's not bad.
+        // so not all things are created everytime, boosting performance. 
+        // Even C# is starting to consider lazy instantiation for dependencies in a class https://thecodeblogger.com/2021/04/28/delayed-instantiation-using-dependency-injection-in-net/
+        // It does add boiler plate but it's not bad.
         
         // IProvideLoggers
         member _.CreateLogger name = service.GetService<ILoggerProvider>().CreateLogger(name)
@@ -199,13 +232,19 @@ type AppEnv (service : IServiceProvider) =
         member _.Configuration = service.GetService<IConfiguration>()
         // IProvideDatabaseAccess
         member _.Database = service.GetService<IWrapDapper>()
+        // IProvideDateTime
+        member _.UtcNow = DateTimeOffset.UtcNow
+        // IProvideCaching
+        member _.DistributedCache = service.GetService<IDistributedCache>()
 
 type DapperWrapper(connection : IDbConnection) =
     interface IWrapDapper with
-        member _.QueryAsync<'T>(sql: string, ?param: obj, ?transaction: IDbTransaction, ?commandTimeout: int, ?commandType: CommandType) =
-            connection.QueryAsync<'T>(sql, ?param=param, ?transaction = transaction, ?commandTimeout= commandTimeout, ?commandType=commandType)
-        member _.ExecuteAsync(sql: string, ?param: obj, ?transaction: IDbTransaction, ?commandTimeout: int, ?commandType: CommandType) =
-            connection.ExecuteAsync(sql, ?param=param, ?transaction = transaction, ?commandTimeout= commandTimeout, ?commandType=commandType)
+        member _.QueryAsync<'T>(sql: string, ?param: obj, ?transaction: IDbTransaction, ?commandTimeout: int, ?commandType: CommandType,  ?cancellationToken : CancellationToken) =
+            CommandDefinition(commandText = sql, ?parameters = param, ?transaction = transaction, ?commandTimeout= commandTimeout, ?commandType=commandType, ?cancellationToken = cancellationToken)
+            |> connection.QueryAsync<'T>
+        member _.ExecuteAsync(sql: string, ?param: obj, ?transaction: IDbTransaction, ?commandTimeout: int, ?commandType: CommandType, ?cancellationToken : CancellationToken) =
+            CommandDefinition(commandText = sql, ?parameters = param, ?transaction = transaction, ?commandTimeout= commandTimeout, ?commandType=commandType, ?cancellationToken = cancellationToken)
+            |> connection.ExecuteAsync
         member _.SelectAsync<'T>(sql: SelectQuery, ?transaction: IDbTransaction, ?commandTimeout: int) =
             connection.SelectAsync<'T>(sql, ?trans = transaction, ?timeout= commandTimeout)
         member _.InsertAsync<'T>(sql: InsertQuery<'T>, ?transaction: IDbTransaction, ?commandTimeout: int) =
@@ -250,32 +289,43 @@ module Main =
 
     let configureLogging (loggingBuilder : ILoggingBuilder) : unit = 
         loggingBuilder.ClearProviders() |> ignore
-        loggingBuilder.AddConsole() |> ignore
+        loggingBuilder.AddSimpleConsole(fun o -> 
+            o.SingleLine <- true
+            o.UseUtcTimestamp <- true
+            o.TimestampFormat <- "yyyy-MM-ddTHH\\:mm\\:ss.fffffffzzz "
+            o.IncludeScopes <- true
+            ()
+        ) |> ignore
         ()
+        
+    let printServices (serviceCollection : IServiceCollection) =
+        for service in serviceCollection do
+            let implName =
+                service.ImplementationType
+                |> Option.ofObj
+                |> Option.map (fun t -> t.FullName)
+                |> Option.defaultValue ""
+            printfn $"{service.ServiceType.FullName}, {service.Lifetime}, {implName}"
 
     let configureServices (serviceCollection : IServiceCollection) : unit = 
         let serviceProvider = serviceCollection.BuildServiceProvider()
-        // for service in serviceCollection do
-        //     let implName =
-        //         service.ImplementationType
-        //         |> Option.ofObj
-        //         |> Option.map (fun t -> t.FullName)
-        //         |> Option.defaultValue ""
-        //     printfn $"{service.ServiceType.FullName}, {service.Lifetime}, {implName}"
-        // let config = serviceCollection.BuildServiceProvider().GetService<IConfiguration>().GetConnectionString
-        let builder = NpgsqlConnectionStringBuilder(
-            Host = "localhost",
-            Database = "ppp"
-        )
-        serviceCollection.AddTransient<IDbConnection>(fun sp -> new NpgsqlConnection(builder |> string)) |> ignore
-        serviceCollection.AddTransient<IWrapDapper,DapperWrapper>() |> ignore
-        serviceCollection.AddScoped<IEnvironment, AppEnv>() |> ignore
+
+        serviceCollection.AddScoped<IDbConnection>(fun sp -> 
+            let dvdrentaldb = sp.GetService<IConfiguration>().GetConnectionString("dvdrentaldb")
+            new NpgsqlConnection(dvdrentaldb)) |> ignore
+        serviceCollection.AddScoped<IWrapDapper,DapperWrapper>() |> ignore
+        serviceCollection.AddStackExchangeRedisCache(fun  o ->
+            o.Configuration <- serviceProvider.GetService<IConfiguration>().GetConnectionString("redis")
+        ) |> ignore
+        serviceCollection.AddScoped<IEnvironment, AppEnvironment>() |> ignore
+        
+        // printServices serviceCollection
         ()
     let configureHostConfiguration (builder : IConfigurationBuilder) : unit=
         ()
     let configureAppConfiguration (builder : IConfigurationBuilder) : unit=
         ()
-    let configureContainer (builder : HostBuilderContext) (contaier : 'TContainerBuilder) : unit=
+    let configureContainer (builder : HostBuilderContext) (container : 'TContainerBuilder) : unit=
         ()
     let configureHostOptions (builder : HostOptions) : unit=
         ()
@@ -295,11 +345,13 @@ module Main =
                 
 
         let! host = hostBuilder.StartAsync(ct) |> Async.AwaitTask
-        let appEnv = host.Services.GetService<IEnvironment>()
-        let logger = appEnv |> LogProvider.createLogger "AppDomain.CurrentDomain.UnhandledException" 
+        use serviceScope = host.Services.CreateScope()
+        let appEnv = serviceScope.ServiceProvider.GetService<IEnvironment>()
+        let logger = LogProvider.createLogger "AppDomain.CurrentDomain.UnhandledException" appEnv
         setupUnhandleExcpetionHandling logger
-
-        do! App.doWork appEnv
+        while true do 
+            do! App.doWork appEnv
+        // do! App.doWork (host.Services.GetService<_>())
 
         return 0
     }
