@@ -257,17 +257,17 @@ type DapperWrapper(connection : IDbConnection) =
         member _.QueryAsync<'T>(sql: string, ?param: IDictionary<string,obj>, ?transaction: IDbTransaction, ?commandTimeout: int, ?commandType: CommandType,  ?cancellationToken : CancellationToken) =
             CommandDefinition(commandText = sql, ?parameters = (param |> Option.map box), ?transaction = transaction, ?commandTimeout= commandTimeout, ?commandType=commandType, ?cancellationToken = cancellationToken)
             |> connection.QueryAsync<'T>
-        member _.QueryIAsync<'T>(sql: FormattableString, ?transaction: IDbTransaction, ?commandTimeout: int, ?commandType: CommandType,  ?cancellationToken : CancellationToken) =
+        member this.QueryIAsync<'T>(sql: FormattableString, ?transaction: IDbTransaction, ?commandTimeout: int, ?commandType: CommandType,  ?cancellationToken : CancellationToken) =
             let commandText, parameters = Sql.queryI sql
-            CommandDefinition(commandText = commandText, parameters = parameters, ?transaction = transaction, ?commandTimeout= commandTimeout, ?commandType=commandType, ?cancellationToken = cancellationToken)
-            |> connection.QueryAsync<'T>
+            (this :> IWrapDapper).QueryAsync<'T>(commandText,param = parameters ,?transaction = transaction, ?commandTimeout=commandTimeout, ?commandType=commandType,?cancellationToken = cancellationToken)
+
         member _.ExecuteAsync(sql: string, ?param: IDictionary<string,obj>, ?transaction: IDbTransaction, ?commandTimeout: int, ?commandType: CommandType, ?cancellationToken : CancellationToken) =
             CommandDefinition(commandText = sql, ?parameters = (param |> Option.map box), ?transaction = transaction, ?commandTimeout= commandTimeout, ?commandType=commandType, ?cancellationToken = cancellationToken)
             |> connection.ExecuteAsync
-        member _.ExecuteIAsync(sql: FormattableString, ?transaction: IDbTransaction, ?commandTimeout: int, ?commandType: CommandType, ?cancellationToken : CancellationToken) =
+        member this.ExecuteIAsync(sql: FormattableString, ?transaction: IDbTransaction, ?commandTimeout: int, ?commandType: CommandType, ?cancellationToken : CancellationToken) =
             let commandText, parameters = Sql.queryI sql
-            CommandDefinition(commandText = commandText, parameters = parameters, ?transaction = transaction, ?commandTimeout= commandTimeout, ?commandType=commandType, ?cancellationToken = cancellationToken)
-            |> connection.ExecuteAsync
+            (this :> IWrapDapper).ExecuteAsync(commandText,param = parameters ,?transaction = transaction, ?commandTimeout=commandTimeout, ?commandType=commandType,?cancellationToken = cancellationToken)
+
         member _.SelectAsync<'T>(sql: SelectQuery, ?transaction: IDbTransaction, ?commandTimeout: int) =
             connection.SelectAsync<'T>(sql, ?trans = transaction, ?timeout= commandTimeout)
         member _.InsertAsync<'T>(sql: InsertQuery<'T>, ?transaction: IDbTransaction, ?commandTimeout: int) =
