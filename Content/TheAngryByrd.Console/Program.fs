@@ -13,6 +13,7 @@ open Dapper.FSharp.PostgreSQL
 open System.Threading.Tasks
 open System.Threading
 open Microsoft.Extensions.Caching.Distributed
+open System.Collections.Generic
 
 module Option =
     let inline ofNull value =
@@ -30,8 +31,10 @@ module Option =
 
 [<Interface>] 
 type IWrapDapper =
-    abstract QueryAsync<'T> :  sql: string * ?param:obj * ?transaction:IDbTransaction * ?commandTimeout:int * ?commandType:CommandType * ?cancellationToken : CancellationToken -> Task<'T seq>
-    abstract ExecuteAsync :    sql: string * ?param:obj * ?transaction:IDbTransaction * ?commandTimeout:int * ?commandType:CommandType * ?cancellationToken : CancellationToken -> Task<int>
+    abstract QueryAsync<'T> :  sql: string * ?param:IDictionary<string,obj> * ?transaction:IDbTransaction * ?commandTimeout:int * ?commandType:CommandType * ?cancellationToken : CancellationToken -> Task<'T seq>
+    abstract QueryIAsync<'T> : sql: FormattableString  * ?transaction:IDbTransaction * ?commandTimeout:int * ?commandType:CommandType * ?cancellationToken : CancellationToken -> Task<'T seq>
+    abstract ExecuteAsync :    sql: string * ?param:IDictionary<string,obj> * ?transaction:IDbTransaction * ?commandTimeout:int * ?commandType:CommandType * ?cancellationToken : CancellationToken -> Task<int>
+    abstract ExecuteIAsync :   sql: FormattableString  * ?transaction:IDbTransaction * ?commandTimeout:int * ?commandType:CommandType * ?cancellationToken : CancellationToken -> Task<int>
     abstract SelectAsync<'T> : sql: SelectQuery * ?transaction:IDbTransaction * ?commandTimeout:int  -> Task<'T seq>
     abstract InsertAsync<'T> : sql: InsertQuery<'T> * ?transaction:IDbTransaction * ?commandTimeout:int  -> Task<int>
     abstract UpdateAsync<'T> : sql: UpdateQuery<'T> * ?transaction:IDbTransaction * ?commandTimeout:int  -> Task<int>
@@ -177,44 +180,46 @@ module ActorRepository =
         last_update : DateTime
     }
 
-    let fetchActors (env: #IProvideDatabaseAccess) = async {
+    let fetchActorById (actor_id : int) (env: #IProvideDatabaseAccess) = async {
         let! ct = Async.CancellationToken
-        return! env.Database.QueryAsync<Actor>("SELECT * FROM actor", cancellationToken=ct) |> Async.AwaitTask
+        // let param = dict [ "@id", box id]
+        // return! env.Database.QueryAsync<Actor>("SELECT * FROM actor WHERE actor_id=@id", param = param, cancellationToken=ct) |> Async.AwaitTask
+        
+        return! env.Database.QueryIAsync<Actor>($"SELECT * FROM actor WHERE actor_id={actor_id}", cancellationToken=ct) |> Async.AwaitTask
     }
 module App =
     open FsToolkit.ErrorHandling
 
-    let getActorName env = async {
-        
+    let getActorName actor_id env = async {
+        let createCacheKey id = $"postgres:actors:{id}:first_name"
         let logger = LogProvider.getCategoryNameByFunc env
         let! ct = Async.CancellationToken
         let cache = DistributedCache.get env
-        let! firstActor = cache.GetStringAsync("first-actor", ct) |> Async.AwaitTask
+        let! firstActor = cache.GetStringAsync(createCacheKey actor_id, ct) |> Async.AwaitTask
         if isNull firstActor then
             Log.info $"Cache miss, Fetching actors" logger
-            let! actors = ActorRepository.fetchActors env
+            let! actors = ActorRepository.fetchActorById actor_id env
             let actor = actors |> Seq.head
             let name = actor.first_name
             let cacheOptions = DistributedCacheEntryOptions(AbsoluteExpirationRelativeToNow = TimeSpan.FromSeconds(10.))
-            do! cache.SetStringAsync("first-actor", name, cacheOptions, ct) |> Async.AwaitTask
+            do! cache.SetStringAsync(createCacheKey actor_id, name, cacheOptions, ct) |> Async.AwaitTask
             return name
         else
             return firstActor
     }
 
     let doWork env = async {
-        let! ct = Async.CancellationToken
         let logger = LogProvider.getCategoryNameByFunc env
         let mutable someValue = 42
         Log.info $"Starting work {someValue:anotherValue} {DateTimeOffset.utcNow env:now}" logger
         let config = Configuration.get env
-        let mycustomKey = config.["MyCustomKey"]
-        let! actorName = getActorName env
+        let actorId = Int32.Parse(config.["ActorToFind"])
+        let! actorName = getActorName actorId env
         // config.AsEnumerable() |> Seq.iter(printfn "%A")
         do! Async.Sleep 2000
         // failwith "lol"
         someValue <- someValue /2
-        Log.warn $"Finishing work {mycustomKey:mycustomKey}, {actorName:actorName}, {someValue:anotherValue}, {DateTimeOffset.utcNow env:now}" logger
+        Log.warn $"Finishing work {actorId:actorId}, {actorName:actorName}, {someValue:anotherValue}, {DateTimeOffset.utcNow env:now}" logger
         ()
     }
 
@@ -237,13 +242,31 @@ type AppEnvironment (service : IServiceProvider) =
         // IProvideCaching
         member _.DistributedCache = service.GetService<IDistributedCache>()
 
+
+module Sql =
+    let queryI (sql: FormattableString)  =
+        let mutable parameterizedString = sql.Format
+        for i = 0 to sql.ArgumentCount-1 do
+            parameterizedString <- parameterizedString.Replace($"{{{i}}}", $"@p{i}")
+        let parameters =
+            List.init (sql.ArgumentCount) (fun i -> $"p{i}", sql.GetArgument(i))
+            |> dict
+        parameterizedString, parameters
 type DapperWrapper(connection : IDbConnection) =
     interface IWrapDapper with
-        member _.QueryAsync<'T>(sql: string, ?param: obj, ?transaction: IDbTransaction, ?commandTimeout: int, ?commandType: CommandType,  ?cancellationToken : CancellationToken) =
-            CommandDefinition(commandText = sql, ?parameters = param, ?transaction = transaction, ?commandTimeout= commandTimeout, ?commandType=commandType, ?cancellationToken = cancellationToken)
+        member _.QueryAsync<'T>(sql: string, ?param: IDictionary<string,obj>, ?transaction: IDbTransaction, ?commandTimeout: int, ?commandType: CommandType,  ?cancellationToken : CancellationToken) =
+            CommandDefinition(commandText = sql, ?parameters = (param |> Option.map box), ?transaction = transaction, ?commandTimeout= commandTimeout, ?commandType=commandType, ?cancellationToken = cancellationToken)
             |> connection.QueryAsync<'T>
-        member _.ExecuteAsync(sql: string, ?param: obj, ?transaction: IDbTransaction, ?commandTimeout: int, ?commandType: CommandType, ?cancellationToken : CancellationToken) =
-            CommandDefinition(commandText = sql, ?parameters = param, ?transaction = transaction, ?commandTimeout= commandTimeout, ?commandType=commandType, ?cancellationToken = cancellationToken)
+        member _.QueryIAsync<'T>(sql: FormattableString, ?transaction: IDbTransaction, ?commandTimeout: int, ?commandType: CommandType,  ?cancellationToken : CancellationToken) =
+            let commandText, parameters = Sql.queryI sql
+            CommandDefinition(commandText = commandText, parameters = parameters, ?transaction = transaction, ?commandTimeout= commandTimeout, ?commandType=commandType, ?cancellationToken = cancellationToken)
+            |> connection.QueryAsync<'T>
+        member _.ExecuteAsync(sql: string, ?param: IDictionary<string,obj>, ?transaction: IDbTransaction, ?commandTimeout: int, ?commandType: CommandType, ?cancellationToken : CancellationToken) =
+            CommandDefinition(commandText = sql, ?parameters = (param |> Option.map box), ?transaction = transaction, ?commandTimeout= commandTimeout, ?commandType=commandType, ?cancellationToken = cancellationToken)
+            |> connection.ExecuteAsync
+        member _.ExecuteIAsync(sql: FormattableString, ?transaction: IDbTransaction, ?commandTimeout: int, ?commandType: CommandType, ?cancellationToken : CancellationToken) =
+            let commandText, parameters = Sql.queryI sql
+            CommandDefinition(commandText = commandText, parameters = parameters, ?transaction = transaction, ?commandTimeout= commandTimeout, ?commandType=commandType, ?cancellationToken = cancellationToken)
             |> connection.ExecuteAsync
         member _.SelectAsync<'T>(sql: SelectQuery, ?transaction: IDbTransaction, ?commandTimeout: int) =
             connection.SelectAsync<'T>(sql, ?trans = transaction, ?timeout= commandTimeout)
@@ -287,7 +310,7 @@ module Main =
             ()
         )
 
-    let configureLogging (loggingBuilder : ILoggingBuilder) : unit = 
+    let configureLogging (hostbuilderContext : HostBuilderContext) (loggingBuilder : ILoggingBuilder) : unit = 
         loggingBuilder.ClearProviders() |> ignore
         loggingBuilder.AddSimpleConsole(fun o -> 
             o.SingleLine <- true
@@ -307,27 +330,26 @@ module Main =
                 |> Option.defaultValue ""
             printfn $"{service.ServiceType.FullName}, {service.Lifetime}, {implName}"
 
-    let configureServices (serviceCollection : IServiceCollection) : unit = 
-        let serviceProvider = serviceCollection.BuildServiceProvider()
-
-        serviceCollection.AddScoped<IDbConnection>(fun sp -> 
+    let configureServices (hostbuilderContext : HostBuilderContext) (serviceCollection : IServiceCollection) : unit = 
+       
+        serviceCollection.AddTransient<IDbConnection>(fun sp -> 
             let dvdrentaldb = sp.GetService<IConfiguration>().GetConnectionString("dvdrentaldb")
             new NpgsqlConnection(dvdrentaldb)) |> ignore
-        serviceCollection.AddScoped<IWrapDapper,DapperWrapper>() |> ignore
+        serviceCollection.AddTransient<IWrapDapper,DapperWrapper>() |> ignore
         serviceCollection.AddStackExchangeRedisCache(fun  o ->
-            o.Configuration <- serviceProvider.GetService<IConfiguration>().GetConnectionString("redis")
+            o.Configuration <- hostbuilderContext.Configuration.GetConnectionString("redis")
         ) |> ignore
-        serviceCollection.AddScoped<IEnvironment, AppEnvironment>() |> ignore
+        serviceCollection.AddTransient<IEnvironment, AppEnvironment>() |> ignore
         
         // printServices serviceCollection
         ()
-    let configureHostConfiguration (builder : IConfigurationBuilder) : unit=
+    let configureHostConfiguration  (builder : IConfigurationBuilder) : unit=
         ()
-    let configureAppConfiguration (builder : IConfigurationBuilder) : unit=
+    let configureAppConfiguration (hostbuilderContext : HostBuilderContext) (builder : IConfigurationBuilder) : unit=
         ()
-    let configureContainer (builder : HostBuilderContext) (container : 'TContainerBuilder) : unit=
+    let configureContainer  (hostbuilderContext : HostBuilderContext) (container : 'TContainerBuilder) : unit=
         ()
-    let configureHostOptions (builder : HostOptions) : unit=
+    let configureHostOptions  (hostbuilderContext : HostBuilderContext) (hostOptions : HostOptions) : unit=
         ()
     let mainAsync (argv : string array) = async {
         do! Async.SwitchToThreadPool()
@@ -345,6 +367,8 @@ module Main =
                 
 
         let! host = hostBuilder.StartAsync(ct) |> Async.AwaitTask
+        ct.Register(fun () -> host.StopAsync().GetAwaiter().GetResult()) 
+        |> ignore
         use serviceScope = host.Services.CreateScope()
         let appEnv = serviceScope.ServiceProvider.GetService<IEnvironment>()
         let logger = LogProvider.createLogger "AppDomain.CurrentDomain.UnhandledException" appEnv
@@ -352,7 +376,7 @@ module Main =
         while true do 
             do! App.doWork appEnv
         // do! App.doWork (host.Services.GetService<_>())
-
+        
         return 0
     }
 
