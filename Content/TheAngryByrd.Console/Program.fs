@@ -40,6 +40,8 @@ module Option =
 type IWrapDapper =
     abstract QueryAsync<'T> :  sql: string * ?param:IDictionary<string,obj> * ?transaction:IDbTransaction * ?commandTimeout:int * ?commandType:CommandType * ?cancellationToken : CancellationToken -> Task<'T seq>
     abstract QueryIAsync<'T> : sql: FormattableString  * ?transaction:IDbTransaction * ?commandTimeout:int * ?commandType:CommandType * ?cancellationToken : CancellationToken -> Task<'T seq>
+    abstract QuerySingleAsync<'T> :  sql: string * ?param:IDictionary<string,obj> * ?transaction:IDbTransaction * ?commandTimeout:int * ?commandType:CommandType * ?cancellationToken : CancellationToken -> Task<'T>
+    abstract QuerySingleIAsync<'T> : sql: FormattableString  * ?transaction:IDbTransaction * ?commandTimeout:int * ?commandType:CommandType * ?cancellationToken : CancellationToken -> Task<'T>
     abstract ExecuteAsync :    sql: string * ?param:IDictionary<string,obj> * ?transaction:IDbTransaction * ?commandTimeout:int * ?commandType:CommandType * ?cancellationToken : CancellationToken -> Task<int>
     abstract ExecuteIAsync :   sql: FormattableString  * ?transaction:IDbTransaction * ?commandTimeout:int * ?commandType:CommandType * ?cancellationToken : CancellationToken -> Task<int>
     abstract SelectAsync<'T> : sql: SelectQuery * ?transaction:IDbTransaction * ?commandTimeout:int  -> Task<'T seq>
@@ -182,7 +184,7 @@ module DistributedCache =
 module ActorRepository =
     [<CLIMutable>]
     type Actor = {
-        actor_id : int64
+        actor_id : int32
         first_name : string
         last_name : string
         last_update : DateTime
@@ -193,7 +195,7 @@ module ActorRepository =
         // let param = dict [ "@id", box id]
         // return! env.Database.QueryAsync<Actor>("SELECT * FROM actor WHERE actor_id=@id", param = param, cancellationToken=ct) |> Async.AwaitTask
         
-        return! env.Database.QueryIAsync<Actor>($"SELECT * FROM actor WHERE actor_id={actor_id}", cancellationToken=ct) |> Async.AwaitTask
+        return! env.Database.QuerySingleIAsync<Actor>($"SELECT * FROM actor WHERE actor_id={actor_id}", cancellationToken=ct) |> Async.AwaitTask
     }
 
 open Microsoft.AspNetCore.Http
@@ -231,8 +233,8 @@ module App =
             let logger = LogProvider.getCategoryNameByFunc env
             Log.info $"Fetching actor {actor_id:actor_id} from database because cache failed for reason: {error_reason:error_reason}, " logger
             let! ct = Async.CancellationToken
-            let! actors = ActorRepository.fetchActorById actor_id env
-            let actor = actors |> Seq.head
+            let! actor = ActorRepository.fetchActorById actor_id env
+
             let cache = DistributedCache.get env
             let cacheOptions = DistributedCacheEntryOptions(AbsoluteExpirationRelativeToNow = TimeSpan.FromSeconds(10.))
             let actorAsJson = JsonSerializer.Serialize  actor
@@ -260,7 +262,7 @@ module App =
     //     ()
     // }
 
-    let getActorById (actor_id : int) (env) next ctx = async {
+    let getActorById (actor_id : int) (env) (next : HttpFunc) (ctx : HttpContext) = async {
         try 
             match! getActor actor_id env with
             | Ok actor ->
@@ -319,6 +321,12 @@ type DapperWrapper(connection : IDbConnection) =
         member this.QueryIAsync<'T>(sql: FormattableString, ?transaction: IDbTransaction, ?commandTimeout: int, ?commandType: CommandType,  ?cancellationToken : CancellationToken) =
             let commandText, parameters = Sql.queryI sql
             (this :> IWrapDapper).QueryAsync<'T>(commandText,param = parameters ,?transaction = transaction, ?commandTimeout=commandTimeout, ?commandType=commandType,?cancellationToken = cancellationToken)
+        member _.QuerySingleAsync<'T>(sql: string, ?param: IDictionary<string,obj>, ?transaction: IDbTransaction, ?commandTimeout: int, ?commandType: CommandType,  ?cancellationToken : CancellationToken) =
+            CommandDefinition(commandText = sql, ?parameters = (param |> Option.map box), ?transaction = transaction, ?commandTimeout= commandTimeout, ?commandType=commandType, ?cancellationToken = cancellationToken)
+            |> connection.QuerySingleAsync<'T>
+        member this.QuerySingleIAsync<'T>(sql: FormattableString, ?transaction: IDbTransaction, ?commandTimeout: int, ?commandType: CommandType,  ?cancellationToken : CancellationToken) =
+            let commandText, parameters = Sql.queryI sql
+            (this :> IWrapDapper).QuerySingleAsync<'T>(commandText,param = parameters ,?transaction = transaction, ?commandTimeout=commandTimeout, ?commandType=commandType,?cancellationToken = cancellationToken)
 
         member _.ExecuteAsync(sql: string, ?param: IDictionary<string,obj>, ?transaction: IDbTransaction, ?commandTimeout: int, ?commandType: CommandType, ?cancellationToken : CancellationToken) =
             CommandDefinition(commandText = sql, ?parameters = (param |> Option.map box), ?transaction = transaction, ?commandTimeout= commandTimeout, ?commandType=commandType, ?cancellationToken = cancellationToken)
@@ -446,9 +454,7 @@ module Main =
                 // .ConfigureHostOptions(configureHostOptions)
                 // .ConfigureServices(configureServices)
         let host = hostBuilder.Build()
-        // let! host = hostBuilder.StartAsync(ct) |> Async.AwaitTask
-        ct.Register(fun () -> host.StopAsync().GetAwaiter().GetResult()) 
-        |> ignore
+        
         use serviceScope = host.Services.CreateScope()
         let appEnv = serviceScope.ServiceProvider.GetService<IEnvironment>()
         let logger = LogProvider.createLogger "AppDomain.CurrentDomain.UnhandledException" appEnv
