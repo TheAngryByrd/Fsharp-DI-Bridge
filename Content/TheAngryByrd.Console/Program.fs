@@ -1,9 +1,14 @@
 ﻿namespace TheAngryByrd.Console
 
-open Microsoft.Extensions.Logging
-open Microsoft.Extensions.DependencyInjection
-open Microsoft.Extensions.Hosting
+open System
 open Microsoft.Extensions.Configuration
+open Microsoft.Extensions.Logging
+open Microsoft.AspNetCore.Builder
+open Microsoft.AspNetCore.Hosting
+open Microsoft.Extensions.Hosting
+open Microsoft.Extensions.DependencyInjection
+open Giraffe
+open Giraffe.EndpointRouting
 open System
 open System.Data
 open Dapper
@@ -14,6 +19,8 @@ open System.Threading.Tasks
 open System.Threading
 open Microsoft.Extensions.Caching.Distributed
 open System.Collections.Generic
+
+
 
 module Option =
     let inline ofNull value =
@@ -81,6 +88,7 @@ module DateTimeOffset =
 module Log =
     open System
     open System.Text.RegularExpressions
+
     let _formatterRegex =
         Regex(@"(?<!{){(?<number>\d+)(?<columnFormat>:(?<format>[^}]+))?}(?!})", RegexOptions.Compiled)
 
@@ -187,12 +195,24 @@ module ActorRepository =
         
         return! env.Database.QueryIAsync<Actor>($"SELECT * FROM actor WHERE actor_id={actor_id}", cancellationToken=ct) |> Async.AwaitTask
     }
+
+open Microsoft.AspNetCore.Http
+type RequireEnv() =
+    static member services(map: IEnvironment -> HttpFunc -> HttpContext -> Task<HttpContext option>) =
+        fun next (ctx : HttpContext) ->
+            map (ctx.GetService<IEnvironment>()) next ctx
+    static member services(map: IEnvironment -> HttpFunc -> HttpContext -> Async<HttpContext option>) =
+        fun next (ctx : HttpContext) ->
+            Async.StartAsTask(map (ctx.GetService<IEnvironment>()) next ctx, cancellationToken = ctx.RequestAborted)
+
 module App =
     open FsToolkit.ErrorHandling
+    open System.Text.Json
 
-    let getActorName actor_id env = async {
+    let getActor actor_id env = async {
         let createCacheKey id = $"postgres:actors:{id}:first_name"
         let logger = LogProvider.getCategoryNameByFunc env
+        Log.info $"Getting {actor_id:actor_id}" logger
         let! ct = Async.CancellationToken
         let cache = DistributedCache.get env
         let! firstActor = cache.GetStringAsync(createCacheKey actor_id, ct) |> Async.AwaitTask
@@ -200,12 +220,12 @@ module App =
             Log.info $"Cache miss, Fetching actors" logger
             let! actors = ActorRepository.fetchActorById actor_id env
             let actor = actors |> Seq.head
-            let name = actor.first_name
             let cacheOptions = DistributedCacheEntryOptions(AbsoluteExpirationRelativeToNow = TimeSpan.FromSeconds(10.))
-            do! cache.SetStringAsync(createCacheKey actor_id, name, cacheOptions, ct) |> Async.AwaitTask
-            return name
+            let actorAsJson = JsonSerializer.Serialize  actor
+            do! cache.SetStringAsync(createCacheKey actor_id, actorAsJson, cacheOptions, ct) |> Async.AwaitTask
+            return actor
         else
-            return firstActor
+            return JsonSerializer.Deserialize firstActor
     }
 
     let doWork env = async {
@@ -214,7 +234,8 @@ module App =
         Log.info $"Starting work {someValue:anotherValue} {DateTimeOffset.utcNow env:now}" logger
         let config = Configuration.get env
         let actorId = Int32.Parse(config.["ActorToFind"])
-        let! actorName = getActorName actorId env
+        let! actor = getActor actorId env
+        let actorName = $"{actor.first_name} {actor.last_name}"
         // config.AsEnumerable() |> Seq.iter(printfn "%A")
         do! Async.Sleep 2000
         // failwith "lol"
@@ -222,6 +243,25 @@ module App =
         Log.warn $"Finishing work {actorId:actorId}, {actorName:actorName}, {someValue:anotherValue}, {DateTimeOffset.utcNow env:now}" logger
         ()
     }
+
+    let getActorById (actor_id : int) (env) next ctx = async {
+        try 
+            let! actor = getActor actor_id env
+            return! json actor next ctx |> Async.AwaitTask
+        with e ->
+            return! setStatusCode 404 next ctx |> Async.AwaitTask
+    }
+
+
+
+    let endpoints = [
+        GET [
+            routef "/actors/%i" (fun actor_id -> 
+                RequireEnv.services(
+                    getActorById actor_id
+            ))
+        ]
+    ]
 
 type AppEnvironment (service : IServiceProvider) = 
     interface IEnvironment with 
@@ -281,6 +321,8 @@ module Main =
     open System
     open System.Threading
 
+    
+
     let inline tryCancel (cts : CancellationTokenSource) =
         try
             cts.Cancel()
@@ -310,7 +352,7 @@ module Main =
             ()
         )
 
-    let configureLogging (hostbuilderContext : HostBuilderContext) (loggingBuilder : ILoggingBuilder) : unit = 
+    let configureLogging (hostbuilderContext : WebHostBuilderContext) (loggingBuilder : ILoggingBuilder) : unit = 
         loggingBuilder.ClearProviders() |> ignore
         loggingBuilder.AddSimpleConsole(fun o -> 
             o.SingleLine <- true
@@ -330,8 +372,8 @@ module Main =
                 |> Option.defaultValue ""
             printfn $"{service.ServiceType.FullName}, {service.Lifetime}, {implName}"
 
-    let configureServices (hostbuilderContext : HostBuilderContext) (serviceCollection : IServiceCollection) : unit = 
-       
+    let configureServices (hostbuilderContext : WebHostBuilderContext) (serviceCollection : IServiceCollection) : unit = 
+        serviceCollection.AddGiraffe() |> ignore
         serviceCollection.AddTransient<IDbConnection>(fun sp -> 
             let dvdrentaldb = sp.GetService<IConfiguration>().GetConnectionString("dvdrentaldb")
             new NpgsqlConnection(dvdrentaldb)) |> ignore
@@ -351,6 +393,16 @@ module Main =
         ()
     let configureHostOptions  (hostbuilderContext : HostBuilderContext) (hostOptions : HostOptions) : unit=
         ()
+    let configure endpoints (hostbuilderContext : WebHostBuilderContext) (builder : IApplicationBuilder) =   
+        builder
+            .UseRouting()
+            .UseEndpoints(fun e -> e.MapGiraffeEndpoints(endpoints))
+        |> ignore
+        ()
+
+
+
+
     let mainAsync (argv : string array) = async {
         do! Async.SwitchToThreadPool()
         let! ct = Async.CancellationToken
@@ -358,25 +410,36 @@ module Main =
         let hostBuilder =
             Host
                 .CreateDefaultBuilder(argv)
-                .ConfigureLogging(configureLogging)
-                .ConfigureHostConfiguration(configureHostConfiguration)
-                .ConfigureAppConfiguration(configureAppConfiguration)
-                .ConfigureContainer(configureContainer)
-                .ConfigureHostOptions(configureHostOptions)
-                .ConfigureServices(configureServices)
-                
+                .ConfigureWebHostDefaults(fun webhost ->
+                    webhost
+                        .Configure(configure App.endpoints)
+                        .ConfigureLogging(configureLogging)
+                        .ConfigureServices(configureServices)
 
-        let! host = hostBuilder.StartAsync(ct) |> Async.AwaitTask
+                    
+                    |> ignore
+                )
+                // .ConfigureWebHost()
+                // .ConfigureLogging(configureLogging)
+                // .ConfigureHostConfiguration(configureHostConfiguration)
+                // .ConfigureAppConfiguration(configureAppConfiguration)
+                // .ConfigureContainer(configureContainer)
+                // .ConfigureHostOptions(configureHostOptions)
+                // .ConfigureServices(configureServices)
+        let host = hostBuilder.Build()
+        // let! host = hostBuilder.StartAsync(ct) |> Async.AwaitTask
         ct.Register(fun () -> host.StopAsync().GetAwaiter().GetResult()) 
         |> ignore
         use serviceScope = host.Services.CreateScope()
         let appEnv = serviceScope.ServiceProvider.GetService<IEnvironment>()
         let logger = LogProvider.createLogger "AppDomain.CurrentDomain.UnhandledException" appEnv
         setupUnhandleExcpetionHandling logger
-        while true do 
-            do! App.doWork appEnv
+        // while true do 
+        //     do! App.doWork appEnv
         // do! App.doWork (host.Services.GetService<_>())
         
+        do! host.RunAsync(ct) |> Async.AwaitTask
+
         return 0
     }
 
