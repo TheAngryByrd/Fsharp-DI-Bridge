@@ -209,56 +209,75 @@ module App =
     open FsToolkit.ErrorHandling
     open System.Text.Json
 
+
+
     let getActor actor_id env = async {
-        let createCacheKey id = $"postgres:actors:{id}:first_name"
-        let logger = LogProvider.getCategoryNameByFunc env
-        Log.info $"Getting {actor_id:actor_id}" logger
-        let! ct = Async.CancellationToken
-        let cache = DistributedCache.get env
-        let! firstActor = cache.GetStringAsync(createCacheKey actor_id, ct) |> Async.AwaitTask
-        if isNull firstActor then
-            Log.info $"Cache miss, Fetching actors" logger
+        let createCacheKey id = $"postgres:actors:{id}"
+        let getActorFromCache actor_id env = asyncResult {
+            let logger = LogProvider.getCategoryNameByFunc env
+            Log.info $"Fetching actor {actor_id:actor_id} from cache"  logger
+            let! ct = Async.CancellationToken
+            try 
+                let cache = DistributedCache.get env
+                let! actorAsJson = cache.GetStringAsync(createCacheKey actor_id, ct) |> Async.AwaitTask
+                if isNull actorAsJson then
+                    return! Error "Cache miss"
+                else
+                    return JsonSerializer.Deserialize<ActorRepository.Actor> actorAsJson
+            with e ->
+                return! Error (e.Message)
+        }
+        let getActorFromDatabaseThenCache actor_id env error_reason = asyncResult {
+            let logger = LogProvider.getCategoryNameByFunc env
+            Log.info $"Fetching actor {actor_id:actor_id} from database because cache failed for reason: {error_reason:error_reason}, " logger
+            let! ct = Async.CancellationToken
             let! actors = ActorRepository.fetchActorById actor_id env
             let actor = actors |> Seq.head
+            let cache = DistributedCache.get env
             let cacheOptions = DistributedCacheEntryOptions(AbsoluteExpirationRelativeToNow = TimeSpan.FromSeconds(10.))
             let actorAsJson = JsonSerializer.Serialize  actor
             do! cache.SetStringAsync(createCacheKey actor_id, actorAsJson, cacheOptions, ct) |> Async.AwaitTask
             return actor
-        else
-            return JsonSerializer.Deserialize firstActor
+        }
+        return!
+            getActorFromCache actor_id env
+            |> AsyncResult.orElseWith (getActorFromDatabaseThenCache actor_id env)
     }
 
-    let doWork env = async {
-        let logger = LogProvider.getCategoryNameByFunc env
-        let mutable someValue = 42
-        Log.info $"Starting work {someValue:anotherValue} {DateTimeOffset.utcNow env:now}" logger
-        let config = Configuration.get env
-        let actorId = Int32.Parse(config.["ActorToFind"])
-        let! actor = getActor actorId env
-        let actorName = $"{actor.first_name} {actor.last_name}"
-        // config.AsEnumerable() |> Seq.iter(printfn "%A")
-        do! Async.Sleep 2000
-        // failwith "lol"
-        someValue <- someValue /2
-        Log.warn $"Finishing work {actorId:actorId}, {actorName:actorName}, {someValue:anotherValue}, {DateTimeOffset.utcNow env:now}" logger
-        ()
-    }
+    // let doWork env = async {
+    //     let logger = LogProvider.getCategoryNameByFunc env
+    //     let mutable someValue = 42
+    //     Log.info $"Starting work {someValue:anotherValue} {DateTimeOffset.utcNow env:now}" logger
+    //     let config = Configuration.get env
+    //     let actorId = Int32.Parse(config.["ActorToFind"])
+    //     let! actor = getActor actorId env
+    //     let actorName = $"{actor.first_name} {actor.last_name}"
+    //     // config.AsEnumerable() |> Seq.iter(printfn "%A")
+    //     do! Async.Sleep 2000
+    //     // failwith "lol"
+    //     someValue <- someValue /2
+    //     Log.warn $"Finishing work {actorId:actorId}, {actorName:actorName}, {someValue:anotherValue}, {DateTimeOffset.utcNow env:now}" logger
+    //     ()
+    // }
 
     let getActorById (actor_id : int) (env) next ctx = async {
         try 
-            let! actor = getActor actor_id env
-            return! json actor next ctx |> Async.AwaitTask
+            match! getActor actor_id env with
+            | Ok actor ->
+                return! json actor next ctx |> Async.AwaitTask
+            | Error e ->
+                printfn "%A" e
+                return! setStatusCode 404 next ctx |> Async.AwaitTask
         with e ->
-            return! setStatusCode 404 next ctx |> Async.AwaitTask
+            return! setStatusCode 500 next ctx |> Async.AwaitTask
     }
-
-
 
     let endpoints = [
         GET [
-            routef "/actors/%i" (fun actor_id -> 
-                RequireEnv.services(
-                    getActorById actor_id
+            routef "/actors/%i" (
+                fun actor_id -> 
+                    RequireEnv.services(
+                        getActorById actor_id
             ))
         ]
     ]
