@@ -44,10 +44,10 @@ type IWrapDapper =
     abstract QuerySingleIAsync<'T> : sql: FormattableString  * ?transaction:IDbTransaction * ?commandTimeout:int * ?commandType:CommandType * ?cancellationToken : CancellationToken -> Task<'T>
     abstract ExecuteAsync :    sql: string * ?param:IDictionary<string,obj> * ?transaction:IDbTransaction * ?commandTimeout:int * ?commandType:CommandType * ?cancellationToken : CancellationToken -> Task<int>
     abstract ExecuteIAsync :   sql: FormattableString  * ?transaction:IDbTransaction * ?commandTimeout:int * ?commandType:CommandType * ?cancellationToken : CancellationToken -> Task<int>
-    abstract SelectAsync<'T> : sql: SelectQuery * ?transaction:IDbTransaction * ?commandTimeout:int  -> Task<'T seq>
-    abstract InsertAsync<'T> : sql: InsertQuery<'T> * ?transaction:IDbTransaction * ?commandTimeout:int  -> Task<int>
-    abstract UpdateAsync<'T> : sql: UpdateQuery<'T> * ?transaction:IDbTransaction * ?commandTimeout:int  -> Task<int>
-    abstract DeleteAsync :     sql: DeleteQuery * ?transaction:IDbTransaction * ?commandTimeout:int  -> Task<int>
+    abstract SelectAsync<'T> : sql: SelectQuery * ?transaction:IDbTransaction * ?commandTimeout:int * ?cancellationToken : CancellationToken -> Task<'T seq>
+    abstract InsertAsync<'T> : sql: InsertQuery<'T> * ?transaction:IDbTransaction * ?commandTimeout:int * ?cancellationToken : CancellationToken  -> Task<int>
+    abstract UpdateAsync<'T> : sql: UpdateQuery<'T> * ?transaction:IDbTransaction * ?commandTimeout:int * ?cancellationToken : CancellationToken  -> Task<int>
+    abstract DeleteAsync :     sql: DeleteQuery * ?transaction:IDbTransaction * ?commandTimeout:int  * ?cancellationToken : CancellationToken -> Task<int>
 
 [<Interface>] type IProvideDatabaseAccess = abstract Database: IWrapDapper
 
@@ -335,14 +335,14 @@ type DapperWrapper(connection : IDbConnection) =
             let commandText, parameters = Sql.queryI sql
             (this :> IWrapDapper).ExecuteAsync(commandText,param = parameters ,?transaction = transaction, ?commandTimeout=commandTimeout, ?commandType=commandType,?cancellationToken = cancellationToken)
 
-        member _.SelectAsync<'T>(sql: SelectQuery, ?transaction: IDbTransaction, ?commandTimeout: int) =
-            connection.SelectAsync<'T>(sql, ?trans = transaction, ?timeout= commandTimeout)
-        member _.InsertAsync<'T>(sql: InsertQuery<'T>, ?transaction: IDbTransaction, ?commandTimeout: int) =
-            connection.InsertAsync<'T>(sql, ?trans = transaction, ?timeout= commandTimeout)
-        member _.UpdateAsync<'T>(sql: UpdateQuery<'T>, ?transaction: IDbTransaction, ?commandTimeout: int) =
-            connection.UpdateAsync<'T>(sql, ?trans = transaction, ?timeout= commandTimeout)
-        member _.DeleteAsync(sql: DeleteQuery, ?transaction: IDbTransaction, ?commandTimeout: int) =
-            connection.DeleteAsync(sql, ?trans = transaction, ?timeout= commandTimeout)
+        member _.SelectAsync<'T>(sql: SelectQuery, ?transaction: IDbTransaction, ?commandTimeout: int, ?cancellationToken : CancellationToken) =
+            connection.SelectAsync<'T>(sql, ?trans = transaction, ?timeout= commandTimeout, ?cancellationToken= cancellationToken)
+        member _.InsertAsync<'T>(sql: InsertQuery<'T>, ?transaction: IDbTransaction, ?commandTimeout: int, ?cancellationToken : CancellationToken) =
+            connection.InsertAsync<'T>(sql, ?trans = transaction, ?timeout= commandTimeout, ?cancellationToken= cancellationToken)
+        member _.UpdateAsync<'T>(sql: UpdateQuery<'T>, ?transaction: IDbTransaction, ?commandTimeout: int, ?cancellationToken : CancellationToken) =
+            connection.UpdateAsync<'T>(sql, ?trans = transaction, ?timeout= commandTimeout, ?cancellationToken= cancellationToken)
+        member _.DeleteAsync(sql: DeleteQuery, ?transaction: IDbTransaction, ?commandTimeout: int, ?cancellationToken : CancellationToken) =
+            connection.DeleteAsync(sql, ?trans = transaction, ?timeout= commandTimeout, ?cancellationToken= cancellationToken)
 
 module Main =
     open System

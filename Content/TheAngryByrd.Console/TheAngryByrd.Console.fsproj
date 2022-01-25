@@ -10,7 +10,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="Dapper.Fsharp" Version="3.1.0" />
+    <PackageReference Include="Dapper.Fsharp" Version="3.2.0" />
     <PackageReference Include="Giraffe" Version="5.0.0" />
     <PackageReference Include="Microsoft.Extensions.Caching.Abstractions" Version="6.0.0" />
     <PackageReference Include="Microsoft.Extensions.Caching.StackExchangeRedis" Version="6.0.1" />
