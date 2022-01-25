@@ -193,9 +193,9 @@ module ActorRepository =
     let fetchActorById (actor_id : int) (env: #IProvideDatabaseAccess) = async {
         let! ct = Async.CancellationToken
         // let param = dict [ "@id", box id]
-        // return! env.Database.QueryAsync<Actor>("SELECT * FROM actor WHERE actor_id=@id", param = param, cancellationToken=ct) |> Async.AwaitTask
+        // return! env.Database.QueryAsync<Actor>("SELECT * FROM actor WHERE actor_id=@id", param = param, cancellationToken=ct)
         
-        return! env.Database.QuerySingleIAsync<Actor>($"SELECT * FROM actor WHERE actor_id={actor_id}", cancellationToken=ct) |> Async.AwaitTask
+        return! env.Database.QuerySingleIAsync<Actor>($"SELECT * FROM actor WHERE actor_id={actor_id}", cancellationToken=ct)
     }
 
 open Microsoft.AspNetCore.Http
@@ -219,7 +219,7 @@ module App =
             let! ct = Async.CancellationToken
             try 
                 let cache = DistributedCache.get env
-                let! actorAsJson = cache.GetStringAsync(createCacheKey actor_id, ct) |> Async.AwaitTask
+                let! actorAsJson = cache.GetStringAsync(createCacheKey actor_id, ct)
                 if isNull actorAsJson then
                     return! Error "Cache miss"
                 else
@@ -238,7 +238,7 @@ module App =
             
             let cacheOptions = DistributedCacheEntryOptions(AbsoluteExpiration = now.Add(TimeSpan.FromSeconds(10.)))
             let actorAsJson = JsonSerializer.Serialize  actor
-            do! cache.SetStringAsync(createCacheKey actor_id, actorAsJson, cacheOptions, ct) |> Async.AwaitTask
+            do! cache.SetStringAsync(createCacheKey actor_id, actorAsJson, cacheOptions, ct)
             return actor
         }
         return!
@@ -266,12 +266,12 @@ module App =
         try 
             match! getActor actor_id env with
             | Ok actor ->
-                return! json actor next ctx |> Async.AwaitTask
+                return! json actor next ctx
             | Error e ->
                 printfn "%A" e
-                return! setStatusCode 404 next ctx |> Async.AwaitTask
+                return! setStatusCode 404 next ctx
         with e ->
-            return! setStatusCode 500 next ctx |> Async.AwaitTask
+            return! setStatusCode 500 next ctx
     }
 
     let endpoints = [
@@ -463,7 +463,7 @@ module Main =
         //     do! App.doWork appEnv
         // do! App.doWork (host.Services.GetService<_>())
         
-        do! host.RunAsync(ct) |> Async.AwaitTask
+        do! host.RunAsync(ct)
 
         return 0
     }
