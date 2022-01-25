@@ -76,14 +76,14 @@ type LogProvider =
         // When we're in a CE we get something like `WebBackend.App+thingsToCall2@130`.
         // CallerMemberName gets us the function that actually called it
         // Splitting off + seems like the best option to get the Fully Qualified Path
-        let location = 
+        let namespaceLocation = 
             System.Reflection.MethodBase.GetCurrentMethod() |> Option.ofObj
             |> Option.bindNull(fun mb -> mb.DeclaringType)
             |> Option.bindNull(fun dt -> dt.FullName)
             |> Option.bind(fun name -> name.Split('+') |> Seq.tryHead)
             |> Option.defaultValue ""
 
-        LogProvider.createLogger $"{location}.{memberName.Value}" env
+        LogProvider.createLogger $"{namespaceLocation}.{memberName.Value}" env
 
 module DateTimeOffset =
     let utcNow (env : #IProvideDateTime) = env.UtcNow
@@ -200,9 +200,9 @@ module ActorRepository =
 
 open Microsoft.AspNetCore.Http
 type RequireEnv() =
-    static member services(map: IEnvironment -> HttpFunc -> HttpContext -> Task<HttpContext option>) =
+    static member services(map: IEnvironment -> CancellationToken -> HttpFunc -> HttpContext  -> Task<HttpContext option>) =
         fun next (ctx : HttpContext) ->
-            map (ctx.GetService<IEnvironment>()) next ctx
+            map (ctx.GetService<IEnvironment>()) ctx.RequestAborted next ctx
     static member services(map: IEnvironment -> HttpFunc -> HttpContext -> Async<HttpContext option>) =
         fun next (ctx : HttpContext) ->
             Async.StartAsTask(map (ctx.GetService<IEnvironment>()) next ctx, cancellationToken = ctx.RequestAborted)
@@ -211,10 +211,8 @@ module App =
     open FsToolkit.ErrorHandling
     open System.Text.Json
 
-
-
     let getActor actor_id env = async {
-        let createCacheKey id = $"postgres:actors:{id}"
+        let inline createCacheKey id = $"postgres:actors:{id}"
         let getActorFromCache actor_id env = asyncResult {
             let logger = LogProvider.getCategoryNameByFunc env
             Log.info $"Fetching actor {actor_id:actor_id} from cache"  logger
@@ -231,12 +229,14 @@ module App =
         }
         let getActorFromDatabaseThenCache actor_id env error_reason = asyncResult {
             let logger = LogProvider.getCategoryNameByFunc env
-            Log.info $"Fetching actor {actor_id:actor_id} from database because cache failed for reason: {error_reason:error_reason}, " logger
+            Log.info $"Fetching actor {actor_id:actor_id} from database because cache failed for reason: {error_reason:error_reason}" logger
             let! ct = Async.CancellationToken
             let! actor = ActorRepository.fetchActorById actor_id env
 
             let cache = DistributedCache.get env
-            let cacheOptions = DistributedCacheEntryOptions(AbsoluteExpirationRelativeToNow = TimeSpan.FromSeconds(10.))
+            let now = DateTimeOffset.utcNow env
+            
+            let cacheOptions = DistributedCacheEntryOptions(AbsoluteExpiration = now.Add(TimeSpan.FromSeconds(10.)))
             let actorAsJson = JsonSerializer.Serialize  actor
             do! cache.SetStringAsync(createCacheKey actor_id, actorAsJson, cacheOptions, ct) |> Async.AwaitTask
             return actor
@@ -305,7 +305,7 @@ type AppEnvironment (service : IServiceProvider) =
 
 
 module Sql =
-    let queryI (sql: FormattableString)  =
+    let inline queryI (sql: FormattableString)  =
         let mutable parameterizedString = sql.Format
         for i = 0 to sql.ArgumentCount-1 do
             parameterizedString <- parameterizedString.Replace($"{{{i}}}", $"@p{i}")
