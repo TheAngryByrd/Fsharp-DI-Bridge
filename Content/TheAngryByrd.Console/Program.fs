@@ -20,8 +20,6 @@ open System.Threading
 open Microsoft.Extensions.Caching.Distributed
 open System.Collections.Generic
 
-
-
 module Option =
     let inline ofNull value =
         if Object.ReferenceEquals(value, null) then None
@@ -293,17 +291,15 @@ type AppEnvironment (service : IServiceProvider) =
         // It does add boiler plate but it's not bad.
         
         // IProvideLoggers
-        member _.CreateLogger name = service.GetService<ILoggerProvider>().CreateLogger(name)
+        member _.CreateLogger name = service.GetRequiredService<ILoggerProvider>().CreateLogger(name)
         // IProvideConfiguration
-        member _.Configuration = service.GetService<IConfiguration>()
+        member _.Configuration = service.GetRequiredService<IConfiguration>()
         // IProvideDatabaseAccess
-        member _.Database = service.GetService<IWrapDapper>()
+        member _.Database = service.GetRequiredService<IWrapDapper>()
         // IProvideDateTime
         member _.UtcNow = DateTimeOffset.UtcNow
         // IProvideCaching
-        member _.DistributedCache = service.GetService<IDistributedCache>()
-
-
+        member _.DistributedCache = service.GetRequiredService<IDistributedCache>()
 module Sql =
     let inline queryI (sql: FormattableString)  =
         let mutable parameterizedString = sql.Format
@@ -345,9 +341,6 @@ type DapperWrapper(connection : IDbConnection) =
             connection.DeleteAsync(sql, ?trans = transaction, ?timeout= commandTimeout, ?cancellationToken= cancellationToken)
 
 module Main =
-    open System
-    open System.Threading
-
     
 
     let inline tryCancel (cts : CancellationTokenSource) =
@@ -428,8 +421,6 @@ module Main =
         ()
 
 
-
-
     let mainAsync (argv : string array) = async {
         do! Async.SwitchToThreadPool()
         let! ct = Async.CancellationToken
@@ -442,7 +433,6 @@ module Main =
                         .Configure(configure App.endpoints)
                         .ConfigureLogging(configureLogging)
                         .ConfigureServices(configureServices)
-
                     
                     |> ignore
                 )
