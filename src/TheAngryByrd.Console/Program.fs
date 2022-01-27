@@ -34,7 +34,7 @@ module Option =
 
 [<Interface>] type IProvideConfiguration = abstract Configuration: IConfiguration
 
-[<Interface>] 
+[<Interface;AllowNullLiteral>] 
 type IWrapDapper =
     abstract QueryAsync<'T> :  sql: string * ?param:IDictionary<string,obj> * ?transaction:IDbTransaction * ?commandTimeout:int * ?commandType:CommandType * ?cancellationToken : CancellationToken -> Task<'T seq>
     abstract QueryIAsync<'T> : sql: FormattableString  * ?transaction:IDbTransaction * ?commandTimeout:int * ?commandType:CommandType * ?cancellationToken : CancellationToken -> Task<'T seq>
