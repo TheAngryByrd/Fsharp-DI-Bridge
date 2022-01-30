@@ -11,7 +11,7 @@
 # define multiple services here
 services:
 - name: application
-  project: Content/TheAngryByrd.Console/TheAngryByrd.Console.fsproj
+  project: src/TheAngryByrd.Console/TheAngryByrd.Console.fsproj
 - name: redis
   image: redis
   bindings:
