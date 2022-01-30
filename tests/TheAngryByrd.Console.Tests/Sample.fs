@@ -163,33 +163,43 @@ let tests =
       //   let l = f.CreateLogger("DotNet.TestContainers")
       //   l
       
-      let redisContainerBuilder = 
-        TestcontainersBuilder<RedisTestcontainer>()
-          .WithDatabase(new RedisTestcontainerConfiguration())
-      use redisContainer = redisContainerBuilder.Build() 
-      do! redisContainer.StartAsync()
+      let! redisContainerBuilder = 
+        async {
+          let redisContainerBuilder =
+            TestcontainersBuilder<RedisTestcontainer>()
+              .WithDatabase(new RedisTestcontainerConfiguration())
+          let redisContainer = redisContainerBuilder.Build() 
+          do! redisContainer.StartAsync()
+          return redisContainer
+        } |> Async.StartChild
 
-      let psqlContainerBuilder = 
-        (new TestcontainersBuilder<PostgreSqlTestcontainer>())       
-          // WithDatabase doesn't work correctly with this image since it's environment it expects id init for the database
-          // https://github.com/kristiandupont/dvdrental-image/blob/master/amd64.dockerfile#L5
-          // https://github.com/HofmeisterAn/dotnet-testcontainers/blob/ef67133a1287a5cd183af9ae21e56fd44089f69e/src/DotNet.Testcontainers/Configurations/Modules/Databases/PostgreSqlTestcontainerConfiguration.cs#L35
-          // https://github.com/HofmeisterAn/dotnet-testcontainers/blob/ef67133a1287a5cd183af9ae21e56fd44089f69e/src/DotNet.Testcontainers/Builders/TestcontainersBuilderDatabaseExtension.cs#L17-L18
-          // Not really sure how postgres hooks all this up as their containers are quite large
-          // .WithDatabase(new PostgreSqlTestcontainerConfiguration(Database = "dvdrental", Username="postgres", Password="postgres" ))
-          .WithImage("kristiandupont/dvdrental-image")  
-          .WithPortBinding(0, 5432)
-          .ConfigureContainer(fun c ->
-            c.ContainerPort <- 5432
-            c.Database <- "dvdrental"
-            c.Username <- "postgres"
-            c.Password <- "postgres"
-          )
-          .WithWaitStrategy(Wait.ForUnixContainer().UntilCommandIsCompleted("pg_isready -h 'localhost' -p '5432'"));
-      use psqlContainer = psqlContainerBuilder.Build() 
+      let! psqlContainerBuilder = 
+        async {
+          let psqlContainerBuilder =
+            (new TestcontainersBuilder<PostgreSqlTestcontainer>())       
+              // WithDatabase doesn't work correctly with this image since it's environment it expects id init for the database
+              // https://github.com/kristiandupont/dvdrental-image/blob/master/amd64.dockerfile#L5
+              // https://github.com/HofmeisterAn/dotnet-testcontainers/blob/ef67133a1287a5cd183af9ae21e56fd44089f69e/src/DotNet.Testcontainers/Configurations/Modules/Databases/PostgreSqlTestcontainerConfiguration.cs#L35
+              // https://github.com/HofmeisterAn/dotnet-testcontainers/blob/ef67133a1287a5cd183af9ae21e56fd44089f69e/src/DotNet.Testcontainers/Builders/TestcontainersBuilderDatabaseExtension.cs#L17-L18
+              // Not really sure how postgres hooks all this up as their containers are quite large
+              // .WithDatabase(new PostgreSqlTestcontainerConfiguration(Database = "dvdrental", Username="postgres", Password="postgres" ))
+              .WithImage("kristiandupont/dvdrental-image")  
+              .WithPortBinding(0, 5432)
+              .ConfigureContainer(fun c ->
+                c.ContainerPort <- 5432
+                c.Database <- "dvdrental"
+                c.Username <- "postgres"
+                c.Password <- "postgres"
+              )
+              .WithWaitStrategy(Wait.ForUnixContainer().UntilCommandIsCompleted("pg_isready -h 'localhost' -p '5432'"));
+          let psqlContainer = psqlContainerBuilder.Build() 
 
-      do! psqlContainer.StartAsync()
+          do! psqlContainer.StartAsync()
+          return psqlContainer
+        } |> Async.StartChild
       
+      use! redisContainer = redisContainerBuilder
+      use! psqlContainer = psqlContainerBuilder
 
       let logger _ = NullLogger.Instance :> ILogger
 
