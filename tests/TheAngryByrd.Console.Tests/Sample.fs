@@ -96,6 +96,13 @@ open Moq
 open Microsoft.Extensions.Logging
 open TheAngryByrd.Console.ActorRepository
 open Microsoft.Extensions.Caching.Distributed
+open Microsoft.Extensions.Logging.Abstractions
+open Microsoft.Extensions.Caching.StackExchangeRedis
+open Microsoft.Extensions.Options
+open Npgsql
+open DotNet.Testcontainers.Builders
+open DotNet.Testcontainers.Containers
+open DotNet.Testcontainers.Configurations
 
 [<Tests>]
 let tests =
@@ -134,7 +141,6 @@ let tests =
       envMock.Setup(fun env -> env.CreateLogger(It.IsAny<string>())).Returns(logger.Object) |> ignore
       let database = Mock<IWrapDapper>()
       let querySingleIAsync = task {
-        printfn "%A" query
         return actor
       }
       // F# optional parameters and Moq are weird. You have to specify all named parameters and use the `?paramName` syntax otherwise Moq doesn't recognize it being called
@@ -146,6 +152,69 @@ let tests =
       envMock.Setup(fun env -> env.UtcNow).Returns(DateTime.UtcNow) |> ignore
 
       let! actual = App.getActor 3 envMock.Object
+
+      Expect.equal actual expected ""
+    }
+    testCaseAsync "Get Actor Integration" <| async {
+      
+      // Enabling logging
+      // TestcontainersSettings.Logger <- 
+      //   let f = LoggerFactory.Create(fun f -> f.AddSimpleConsole().SetMinimumLevel(LogLevel.Trace) |> ignore)
+      //   let l = f.CreateLogger("DotNet.TestContainers")
+      //   l
+      
+      let redisContainerBuilder = 
+        TestcontainersBuilder<RedisTestcontainer>()
+          .WithDatabase(new RedisTestcontainerConfiguration())
+      use redisContainer = redisContainerBuilder.Build() 
+      do! redisContainer.StartAsync()
+
+      let psqlContainerBuilder = 
+        (new TestcontainersBuilder<PostgreSqlTestcontainer>())       
+          // WithDatabase doesn't work correctly with this image since it's environment it expects id init for the database
+          // https://github.com/kristiandupont/dvdrental-image/blob/master/amd64.dockerfile#L5
+          // https://github.com/HofmeisterAn/dotnet-testcontainers/blob/ef67133a1287a5cd183af9ae21e56fd44089f69e/src/DotNet.Testcontainers/Configurations/Modules/Databases/PostgreSqlTestcontainerConfiguration.cs#L35
+          // https://github.com/HofmeisterAn/dotnet-testcontainers/blob/ef67133a1287a5cd183af9ae21e56fd44089f69e/src/DotNet.Testcontainers/Builders/TestcontainersBuilderDatabaseExtension.cs#L17-L18
+          // Not really sure how postgres hooks all this up as their containers are quite large
+          // .WithDatabase(new PostgreSqlTestcontainerConfiguration(Database = "dvdrental", Username="postgres", Password="postgres" ))
+          .WithImage("kristiandupont/dvdrental-image")  
+          .WithPortBinding(0, 5432)
+          .ConfigureContainer(fun c ->
+            c.ContainerPort <- 5432
+            c.Database <- "dvdrental"
+            c.Username <- "postgres"
+            c.Password <- "postgres"
+          )
+          .WithWaitStrategy(Wait.ForUnixContainer().UntilCommandIsCompleted("pg_isready -h 'localhost' -p '5432'"));
+      use psqlContainer = psqlContainerBuilder.Build() 
+
+      do! psqlContainer.StartAsync()
+      
+
+      let logger _ = NullLogger.Instance :> ILogger
+
+      let cache = 
+        let redisCacheOption = RedisCacheOptions(Configuration = redisContainer.ConnectionString)
+        new RedisCache(Options.Create(redisCacheOption)) :> IDistributedCache
+
+      let database =
+        let conn = new NpgsqlConnection(psqlContainer.ConnectionString)
+        DapperWrapper(conn) :> IWrapDapper
+
+      let utcNow () = DateTimeOffset.UtcNow
+
+      let env = IGetActorRequirements.create logger cache database utcNow
+
+      let expected = 
+        Ok
+          { 
+            actor_id = 3
+            first_name = "Ed"
+            last_name = "Chase"
+            last_update = DateTime.Parse("2013-05-26T14:47:57.6200000")
+          }
+
+      let! actual = App.getActor 3 env
 
       Expect.equal actual expected ""
     }

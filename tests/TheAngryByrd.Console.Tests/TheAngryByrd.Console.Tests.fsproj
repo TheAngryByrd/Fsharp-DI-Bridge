@@ -13,6 +13,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <PackageReference Include="DotNet.Testcontainers" Version="1.6.0-beta.2042" />
     <PackageReference Include="Expecto" Version="9.*" />
     <PackageReference Include="moq" Version="4.16.1" />
     <PackageReference Include="YoloDev.Expecto.TestSdk" Version="0.*" />
