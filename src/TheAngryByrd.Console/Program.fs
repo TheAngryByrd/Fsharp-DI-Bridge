@@ -30,9 +30,13 @@ module Option =
         | None -> None
 
 
-[<Interface>] type IProvideLoggers = abstract CreateLogger: categoryName:string -> ILogger
+[<Interface>] 
+type IProvideLoggers = 
+    abstract CreateLogger: categoryName:string -> ILogger
 
-[<Interface>] type IProvideConfiguration = abstract Configuration: IConfiguration
+[<Interface>] 
+type IProvideConfiguration = 
+    abstract Configuration: IConfiguration
 
 [<Interface;AllowNullLiteral>] 
 type IWrapDapper =
@@ -47,7 +51,9 @@ type IWrapDapper =
     abstract UpdateAsync<'T> : sql: UpdateQuery<'T> * ?transaction:IDbTransaction * ?commandTimeout:int * ?cancellationToken : CancellationToken  -> Task<int>
     abstract DeleteAsync :     sql: DeleteQuery * ?transaction:IDbTransaction * ?commandTimeout:int  * ?cancellationToken : CancellationToken -> Task<int>
 
-[<Interface>] type IProvideDatabaseAccess = abstract Database: IWrapDapper
+[<Interface>] 
+type IProvideDatabaseAccess = 
+    abstract Database: IWrapDapper
 
 [<Interface>] 
 type IProvideDateTime = 
@@ -198,6 +204,12 @@ module ActorRepository =
 
 open Microsoft.AspNetCore.Http
 type RequireEnv() =
+    static member services(map: IEnvironment -> HttpFunc -> HttpContext  -> ValueTask<HttpContext option>) =
+        fun next (ctx : HttpContext) ->
+            map (ctx.GetService<IEnvironment>()) next ctx |> fun r -> r.AsTask()
+    static member services(map: IEnvironment -> HttpFunc -> HttpContext  -> Task<HttpContext option>) =
+        fun next (ctx : HttpContext) ->
+            map (ctx.GetService<IEnvironment>()) next ctx
     static member services(map: IEnvironment -> CancellationToken -> HttpFunc -> HttpContext  -> Task<HttpContext option>) =
         fun next (ctx : HttpContext) ->
             map (ctx.GetService<IEnvironment>()) ctx.RequestAborted next ctx
@@ -209,32 +221,48 @@ module App =
     open FsToolkit.ErrorHandling
     open System.Text.Json
 
+    type GetActorByIdErrors = 
+    | CacheMiss of key:string
+    | Exception of exn
     let getActor actor_id env = async {
         let inline createCacheKey id = $"postgres:actors:{id}"
-        let getActorFromCache actor_id env = asyncResult {
+        let inline getActorFromCache actor_id env = asyncResult {
             let logger = LogProvider.getCategoryNameByFunc env
             Log.info $"Fetching actor {actor_id:actor_id} from cache"  logger
             let! ct = Async.CancellationToken
             try 
                 let cache = DistributedCache.get env
-                let! actorAsJson = cache.GetStringAsync(createCacheKey actor_id, ct)
+                let cacheKey = createCacheKey actor_id
+                let! actorAsJson = cache.GetStringAsync(cacheKey, ct)
                 if isNull actorAsJson then
-                    return! Error "Cache miss"
+                    return! CacheMiss cacheKey |> Error
                 else
                     return JsonSerializer.Deserialize<ActorRepository.Actor> actorAsJson
             with e ->
-                return! Error (e.Message)
+                return! Exception e |> Error
         }
-        let getActorFromDatabaseThenCache actor_id env error_reason = asyncResult {
+        let inline getActorFromDatabaseThenCache actor_id env (error : GetActorByIdErrors) = asyncResult {
             let logger = LogProvider.getCategoryNameByFunc env
-            Log.info $"Fetching actor {actor_id:actor_id} from database because cache failed for reason: {error_reason:error_reason}" logger
+            
+            match error with
+            | CacheMiss key -> 
+                Log.info $"Fetching actor {actor_id:actor_id} from database because cache failed for reason: Cache miss on {key:cache_key}" logger
+            | Exception e -> 
+                Log.infoWithExn $"Fetching actor {actor_id:actor_id} from database because cache failed for reason: Exception " e logger
+
             let! ct = Async.CancellationToken
             let! actor = ActorRepository.fetchActorById actor_id env
 
             let cache = DistributedCache.get env
             let now = DateTimeOffset.utcNow env
+            let config = Configuration.get env
             
-            let cacheOptions = DistributedCacheEntryOptions(AbsoluteExpiration = now.Add(TimeSpan.FromSeconds(10.)))
+            let cacheTime =
+                match config.GetSection("Caching").GetValue<Nullable<int>>("GetActorCacheInSeconds") |> Option.ofNullable with
+                | Some i -> TimeSpan.FromSeconds(i)
+                | None -> TimeSpan.FromSeconds(10.)
+
+            let cacheOptions = DistributedCacheEntryOptions(AbsoluteExpiration = now.Add(cacheTime))
             let actorAsJson = JsonSerializer.Serialize  actor
             do! cache.SetStringAsync(createCacheKey actor_id, actorAsJson, cacheOptions, ct)
             return actor
@@ -244,21 +272,6 @@ module App =
             |> AsyncResult.orElseWith (getActorFromDatabaseThenCache actor_id env)
     }
 
-    // let doWork env = async {
-    //     let logger = LogProvider.getCategoryNameByFunc env
-    //     let mutable someValue = 42
-    //     Log.info $"Starting work {someValue:anotherValue} {DateTimeOffset.utcNow env:now}" logger
-    //     let config = Configuration.get env
-    //     let actorId = Int32.Parse(config.["ActorToFind"])
-    //     let! actor = getActor actorId env
-    //     let actorName = $"{actor.first_name} {actor.last_name}"
-    //     // config.AsEnumerable() |> Seq.iter(printfn "%A")
-    //     do! Async.Sleep 2000
-    //     // failwith "lol"
-    //     someValue <- someValue /2
-    //     Log.warn $"Finishing work {actorId:actorId}, {actorName:actorName}, {someValue:anotherValue}, {DateTimeOffset.utcNow env:now}" logger
-    //     ()
-    // }
 
     let getActorById (actor_id : int) (env) (next : HttpFunc) (ctx : HttpContext) = async {
         try 
@@ -317,6 +330,7 @@ type DapperWrapper(connection : IDbConnection) =
         member this.QueryIAsync<'T>(sql: FormattableString, ?transaction: IDbTransaction, ?commandTimeout: int, ?commandType: CommandType,  ?cancellationToken : CancellationToken) =
             let commandText, parameters = Sql.queryI sql
             (this :> IWrapDapper).QueryAsync<'T>(commandText,param = parameters ,?transaction = transaction, ?commandTimeout=commandTimeout, ?commandType=commandType,?cancellationToken = cancellationToken)
+        
         member _.QuerySingleAsync<'T>(sql: string, ?param: IDictionary<string,obj>, ?transaction: IDbTransaction, ?commandTimeout: int, ?commandType: CommandType,  ?cancellationToken : CancellationToken) =
             CommandDefinition(commandText = sql, ?parameters = (param |> Option.map box), ?transaction = transaction, ?commandTimeout= commandTimeout, ?commandType=commandType, ?cancellationToken = cancellationToken)
             |> connection.QuerySingleAsync<'T>
@@ -449,9 +463,6 @@ module Main =
         let appEnv = serviceScope.ServiceProvider.GetService<IEnvironment>()
         let logger = LogProvider.createLogger "AppDomain.CurrentDomain.UnhandledException" appEnv
         setupUnhandleExcpetionHandling logger
-        // while true do 
-        //     do! App.doWork appEnv
-        // do! App.doWork (host.Services.GetService<_>())
         
         do! host.RunAsync(ct)
 
